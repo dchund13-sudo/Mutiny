@@ -1643,6 +1643,7 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
         if (m.deck === 'weather' || m.deck === 'lower') p.deck = m.deck;
         if (isFinite(m.x) && isFinite(m.y)) { p.x = m.x; p.y = m.y; }
         p.scene = m.sc || 'd';
+        if (isFinite(m.nx) && isFinite(m.ny)) { p.nx = m.nx; p.ny = m.ny; }
         break;
       case 'settings': if (captain && H.phase === 'lobby') { for (const k in CFG_DEFAULT) if (k in m.cfg) H.cfg[k] = m.cfg[k]; try { localStorage.setItem('stella-mp-settings', JSON.stringify(H.cfg)); } catch (e) {} lobbyBroadcast(); } break;
       case 'start': if (captain && H.phase === 'lobby') hostStart(); break;
@@ -2247,7 +2248,7 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
     const m = H.meeting;
     hostBroadcast({ t: 's', ph: H.phase,
       ps: Object.values(H.players).map(p => [p.pid, p.deck === 'lower' ? 1 : 0, Math.round(p.x), Math.round(p.y),
-        (p.fate ? p.fate[0] : '') + (p.hidden ? 'h' : '') + (p.frozen ? 'f' : '') + (p.scene === 'n' ? 'n' : '') + (p.online ? '' : 'x'), p.fseq]),
+        (p.fate ? p.fate[0] : '') + (p.hidden ? 'h' : '') + (p.frozen ? 'f' : '') + (p.scene === 'n' ? 'n' : '') + (p.online ? '' : 'x'), p.fseq, p.scene === 'n' && p.nx !== undefined ? [p.nx, p.ny] : 0]),
       bo: H.bodies.map(b => [b.pid, b.deck === 'lower' ? 1 : 0, Math.round(b.x), Math.round(b.y)]),
       sab: H.sab && { id: H.sab.id, t: Math.ceil(H.sab.t), l: H.sab.ladder, pr: +(H.sab.prog / SAB[H.sab.id].need).toFixed(2), h: H.sab.held },
       bar: H.barShown, bell: Math.ceil(H.bellCd),
@@ -2449,11 +2450,12 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
 
   // ---------- State from the captain ----------
   function applyState(s) {
-    for (const [pid, dk, x, y, fl, fs] of s.ps) {
+    for (const [pid, dk, x, y, fl, fs, np] of s.ps) {
       const deck = dk ? 'lower' : 'weather';
       let o = C.players[pid];
       if (!o) o = C.players[pid] = { pid, rx: x, ry: y, deck };
       if (o.deck !== deck) { o.rx = x; o.ry = y; }
+      if (np) { if (!o.nest || o.rnx === undefined) { o.rnx = np[0]; o.rny = np[1]; } o.nx = np[0]; o.ny = np[1]; }
       Object.assign(o, { deck, x, y, fate: fl.includes('d') ? 'dead' : fl.includes('o') ? 'over' : fl.includes('p') ? 'plank' : null,
         hidden: fl.includes('h'), frozen: fl.includes('f'), nest: fl.includes('n'), offline: fl.includes('x') });
       if (pid === C.pid) {
@@ -2859,7 +2861,10 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
       if (fade.t >= fade.dur) fade = null;
     }
     if (toast) { toast.t -= dt; if (toast.t <= 0) toast = null; }
-    for (const o of Object.values(C.players)) { const k = Math.min(1, dt * 12); o.rx += (o.x - o.rx) * k; o.ry += (o.y - o.ry) * k; }
+    for (const o of Object.values(C.players)) {
+      const k = Math.min(1, dt * 12); o.rx += (o.x - o.rx) * k; o.ry += (o.y - o.ry) * k;
+      if (o.nx !== undefined) { o.rnx += (o.nx - o.rnx) * k; o.rny += (o.ny - o.rny) * k; }
+    }
     for (const f of fxList) f.t += dt;
     fxList = fxList.filter(f => f.t < 1.6);
     if (C.phase !== 'game') return;
@@ -2913,7 +2918,7 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
     const key = holding && action && action.kind === 'repair' && !busy() ? (action.rp.pry ? 'pry' : 'p' + action.rp.idx) : null;
     if (key !== sentHold) { sentHold = key; toHost({ t: 'act', a: 'hold', key }); }
     // tell the captain where we are
-    if ((posT -= dt) <= 0) { posT = 1 / 15; toHost({ t: 'pos', fs: player.fseq, deck: player.deck, x: Math.round(player.x), y: Math.round(player.y), sc: scene === 'deck' ? 'd' : scene === 'peek' ? 'h' : 'n' }); }
+    if ((posT -= dt) <= 0) { posT = 1 / 15; toHost({ t: 'pos', fs: player.fseq, deck: player.deck, x: Math.round(player.x), y: Math.round(player.y), sc: scene === 'deck' ? 'd' : scene === 'peek' ? 'h' : 'n', ...(scene === 'nest' || scene === 'lookout' ? { nx: Math.round(nestPos.x), ny: Math.round(nestPos.y) } : {}) }); }
     if (candlesOpen && (candleTick -= dt) <= 0) { candleTick = .4; const k2 = C.lobby.map(p => statusOf(p.pid)).join(); if (k2 !== lastRack) { lastRack = k2; renderCandles(); } }
     if (!$('tasklist').hidden && (listTick -= dt) <= 0) { listTick = .5; renderSabs(); }
     // HUD
@@ -3128,7 +3133,15 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
     ctx.save(); ctx.translate(cx, cy); ctx.scale(ns, ns); ctx.translate(-NEST_C, -NEST_C);
     ctx.save(); ctx.beginPath(); ctx.arc(NEST_C, NEST_C, 297, 0, Math.PI * 2); ctx.clip(); ctx.drawImage(IM.nest, 0, 0); ctx.restore();
     drawStations('nest', t);
-    drawSailor(nestPos.x, nestPos.y, 22, colorOf(C.pid), 'You', 22, true);
+    const aloft = Object.values(C.players).filter(o => o.pid !== C.pid && o.nest && !o.hidden && o.rnx !== undefined && (!o.fate || ghost)).sort((a, b) => a.rny - b.rny);
+    for (const o of aloft) {
+      ctx.save(); if (o.fate) ctx.globalAlpha = .45;
+      drawSailor(o.rnx, o.rny, 22, colorOf(o.pid), nameOf(o.pid) + (isPartner(o.pid) ? ' (mutineer)' : ''), 20);
+      ctx.restore();
+    }
+    if (ghost) { ctx.save(); ctx.globalAlpha = .45; }
+    drawSailor(nestPos.x, nestPos.y, 22, colorOf(C.pid), ghost ? 'You (ghost)' : 'You', 22, true);
+    if (ghost) ctx.restore();
     ctx.save(); ctx.beginPath(); ctx.moveTo(212, -20); ctx.lineTo(379, -20); ctx.lineTo(358, 262); ctx.lineTo(236, 262); ctx.closePath(); ctx.clip();
     ctx.drawImage(IM.nest, 0, 0); ctx.restore();
     ctx.restore();
