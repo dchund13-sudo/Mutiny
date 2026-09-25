@@ -240,7 +240,7 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
 <section id="home" class="screen"><div class="inner">
   <h1>Mutiny</h1>
   <p class="tagline">Aboard the Stella Maris, someone wants the ship. Find them before you make port.</p>
-  <label>Your name <input id="name" maxlength="12" autocomplete="nickname" placeholder="e.g. Derek"></label>
+  <label>Your name <input id="name" maxlength="12" autocomplete="nickname" placeholder="e.g. Ishmael"></label>
   <button id="hostbtn" class="bigbtn" type="button">Host a voyage</button>
   <div class="or">or join one</div>
   <div class="joinrow"><input id="code" maxlength="4" autocomplete="off" aria-label="Voyage code" placeholder="CODE"><button id="joinbtn" type="button">Join</button></div>
@@ -1454,9 +1454,10 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
   const BELL_POST = [728, 305, 762, 400], CANDLES = [940, 266];
   const SPAWNS = [[655, 480], [600, 485], [710, 485], [560, 495], [750, 485], [620, 225], [690, 225], [560, 230], [760, 245], [455, 470]];
   const COLORS = ['#c0392b', '#2e86de', '#27ae60', '#f1c40f', '#8e44ad', '#e67e22', '#ecf0f1', '#16a085', '#e84393', '#6d4c41'];
-  const CFG_DEFAULT = { muts: 1, discuss: 60, vote: 20, strike: 25, crit: 40, vision: 1, bar: 'live', confirm: 'yes' };
+  const CFG_DEFAULT = { muts: 1, mutFrom: 'any', discuss: 60, vote: 20, strike: 25, crit: 40, vision: 1, bar: 'live', confirm: 'yes' };
   const SETTINGS_UI = [
     { key: 'muts', label: 'Mutineers', opts: [[1, 'One'], [2, 'Two (6+ sailors)']] },
+    { key: 'mutFrom', label: 'Who can be the mutineer', opts: [['any', 'Anyone aboard'], ['npc', 'Only practice sailors']] },
     { key: 'discuss', label: 'Discussion time', opts: [[30, '30s'], [60, '60s'], [90, '90s'], [120, '120s']] },
     { key: 'vote', label: 'Voting time', opts: [[15, '15s'], [20, '20s'], [30, '30s']] },
     { key: 'strike', label: 'Strike cooldown', opts: [[20, '20s'], [25, '25s'], [35, '35s']] },
@@ -1520,7 +1521,7 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
   function tryHost(name, attempt) {
     const code = makeCode();
     const peer = new Peer(PREFIX + code, { debug: 1 });
-    peer.on('open', () => { Net.peer = peer; Net.code = code; hostInit(name); });
+    peer.on('open', () => { if (Net.code) return; Net.peer = peer; Net.code = code; hostInit(name); });
     peer.on('connection', conn => {
       Net.conns[conn.peer] = conn;
       conn.on('data', d => hostRecv(conn.peer, d));
@@ -1585,6 +1586,8 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
   const cleanName = n => String(n || '').replace(/[<>]/g, '').trim().slice(0, 12) || 'Sailor';
 
   function hostInit(name) {
+    if (H.inited) return;
+    H.inited = true;
     const p = addPlayer('host', name);
     sendTo('host', { t: 'welcome', pid: p.pid, code: Net.code, host: true });
     lobbyBroadcast();
@@ -1600,8 +1603,9 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
     return p;
   }
   function hostHello(conn, name) {
-    const back = Object.values(H.players).find(p => p.name.toLowerCase() === name.toLowerCase() && !p.online);
+    const back = Object.values(H.players).find(p => !p.npc && p.conn !== 'host' && p.name.toLowerCase() === name.toLowerCase() && (!p.online || H.phase !== 'lobby'));
     if (back) {
+      if (back.conn !== conn && Net.conns[back.conn]) { const old = Net.conns[back.conn]; delete Net.conns[back.conn]; try { old.close(); } catch (e) {} }
       delete H.byConn[back.conn]; back.conn = conn; back.online = true; H.byConn[conn] = back.pid;
       sendTo(conn, { t: 'welcome', pid: back.pid, code: Net.code });
       lobbyBroadcast();
@@ -1651,12 +1655,15 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
     for (const q of Object.values(H.players)) if (!q.online) { delete H.byConn[q.conn]; delete H.players[q.pid]; }
     const ps = Object.values(H.players);
     if (ps.length < 3) return;
-    const nMut = H.cfg.muts === 2 && ps.length >= 6 ? 2 : 1;
-    const order = shuffle(ps.slice());
+    // everyone aboard has an equal chance, unless the captain limits the role to practice sailors
+    const pool = H.cfg.mutFrom === 'npc' && ps.some(p => p.npc) ? ps.filter(p => p.npc) : ps;
+    const nMut = H.cfg.muts === 2 && ps.length >= 6 && pool.length >= 2 ? 2 : 1;
+    const order = shuffle(pool.slice());
     const common = pick(['sign', 'water', 'coil']), two = pick(['gun', 'sound']);
     const shorts = ['helm', 'hoist', 'lanterns', 'spy', 'remedies', 'cart', 'cargo', 'pumps'];
     ps.forEach((p, i) => {
-      p.role = order.indexOf(p) < nMut ? 'mut' : 'crew';
+      const seat = order.indexOf(p);
+      p.role = seat >= 0 && seat < nMut ? 'mut' : 'crew';
       p.tasks = shuffle([common, two, ...shuffle(shorts.filter(id => !p.npc || id !== 'spy')).slice(0, 2)]).map(id => ({ id, stage: 0 }));
       if (p.npc) p.ai = newAi();
       Object.assign(p, { fate: null, hidden: false, frozen: false, inHatch: null, bellUsed: false, strikeCd: 20, hatchCd: 0, scene: 'd', deck: 'weather' });
@@ -2350,6 +2357,9 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
     $('lobbynote').textContent = Net.isHost
       ? (C.lobby.length < 3 ? 'You need at least 3 sailors to set sail. Keep this screen open for the whole game.' : 'Keep this screen open for the whole game: your phone runs the voyage.')
       : 'Waiting for the captain to set sail.';
+    if (C.cfg.mutFrom === 'npc') $('lobbynote').textContent += C.lobby.some(p => p.npc)
+      ? ' The mutineer will be one of the practice sailors, so every real player sails as crew.'
+      : (Net.isHost ? ' Add a practice sailor to make one of them the mutineer; otherwise anyone aboard can be dealt the role.' : '');
   }
   $('startbtn').addEventListener('click', () => toHost({ t: 'start' }));
   $('addnpc').addEventListener('click', () => toHost({ t: 'npc', op: 'add' }));
@@ -2405,6 +2415,7 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
   function showRole(first) {
     roleOpen = true; resetJoy();
     let [title, body] = ROLE_TEXT[C.role];
+    if (C.role === 'crew' && C.cfg.mutFrom === 'npc' && C.lobby.some(p => p.npc)) body += ' On this voyage, the mutineer is one of the practice sailors.';
     if (C.role === 'mut' && C.partners.length) { title = 'You are a mutineer'; body += ` Your fellow mutineer is ${C.partners.join(' and ')}.`; }
     $('rctitle').textContent = title; $('rcbody').textContent = body;
     $('rcface').classList.toggle('mut', C.role === 'mut');
@@ -2687,18 +2698,29 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
     const box = $('sabs');
     box.hidden = C.role !== 'mut';
     if (box.hidden) return;
-    box.innerHTML = '<b>Sabotage</b>';
-    for (const id of ['fire', 'leak', 'lanterns', 'compass', 'batten']) {
-      const b = document.createElement('button'); b.type = 'button';
-      const cd = id === 'batten' ? C.me.batCd : C.me.sabCd;
+    if (!box.dataset.built) {
+      box.innerHTML = '<b>Sabotage</b>';
+      for (const id of ['fire', 'leak', 'lanterns', 'compass', 'batten']) {
+        const b = document.createElement('button'); b.type = 'button'; b.dataset.sab = id;
+        const nm = document.createElement('span'); nm.textContent = SAB[id].name;
+        const sm = document.createElement('small');
+        b.append(nm, sm);
+        b.addEventListener('click', () => {
+          if (b.disabled) return;
+          toHost({ t: 'act', a: 'sab', id });
+          $('tasklist').hidden = true; $('tasksbtn').setAttribute('aria-expanded', 'false');
+        });
+        box.append(b);
+      }
+      box.dataset.built = '1';
+    }
+    for (const b of box.querySelectorAll('button[data-sab]')) {
+      const id = b.dataset.sab, cd = id === 'batten' ? C.me.batCd : C.me.sabCd;
       let note = SAB[id].critical ? `Critical: ${C.cfg.crit}s countdown` : id === 'batten' ? 'Locks a ladder for 15s' : 'Non-critical';
       if (C.sab) note = C.sab.id === id ? 'Running now' : 'Another sabotage is running';
       else if (cd > 0) note = `Ready in ${cd}s`;
+      const sm = b.querySelector('small'); if (sm.textContent !== note) sm.textContent = note;
       b.disabled = !!C.sab || cd > 0 || !!C.meeting;
-      b.textContent = SAB[id].name;
-      const sm = document.createElement('small'); sm.textContent = note; b.append(sm);
-      b.addEventListener('click', () => { toHost({ t: 'act', a: 'sab', id }); $('tasklist').hidden = true; $('tasksbtn').setAttribute('aria-expanded', 'false'); });
-      box.append(b);
     }
   }
   let listTick = 0;
